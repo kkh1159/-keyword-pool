@@ -13,7 +13,9 @@ SEEDS = ["제휴마케팅","부업","애드센스","쿠팡파트너스","블로�
          "스레드수익화","어필리에이트","티스토리","챗gpt부업","재택부업"]
 MIN_MOBILE, MAX_MOBILE = 100, 50000
 MAX_DOC_QUERIES = 300
-RATIO_A = 0.20
+RATIO_A = 0.60
+MAX_DOCS = 10000
+MIN_SAVE = 10
 TOPIC_WORDS = ["부업","수익","제휴","투잡","부수입","재택","무자본","파트너스",
                "애드센스","어필리에이트","수익화","자동화","블로그","티스토리"]
 EXCLUDE_WORDS = ["채용","구인","학원","자격증","대출","보험","중고","가격","쿠폰",
@@ -28,6 +30,7 @@ DEFAULT_POOL = ["쿠팡파트너스하는법","스레드수익화","티스토리
 
 _used = set()
 _refreshing = False
+_last_log = {}
 
 
 def load_pool():
@@ -118,10 +121,12 @@ def is_on_topic(k):
 
 
 def rebuild():
-    global _refreshing
+    global _refreshing, _last_log
     if _refreshing:
         return
     _refreshing = True
+    log = {"related": 0, "candidates": 0, "doc_fail": 0,
+           "too_many_docs": 0, "ratio_fail": 0, "passed": 0, "saved": False}
     try:
         pool = {}
         for seed in SEEDS:
@@ -132,24 +137,36 @@ def rebuild():
                 pc, mo = num(it.get("monthlyPcQcCnt")), num(it.get("monthlyMobileQcCnt"))
                 pool[kw] = {"keyword": kw, "mobile": mo, "total": pc + mo}
             time.sleep(0.3)
+        log["related"] = len(pool)
         cands = [v for v in pool.values()
                  if MIN_MOBILE <= v["mobile"] <= MAX_MOBILE and is_on_topic(v["keyword"])]
         cands.sort(key=lambda x: (-len(x["keyword"]), -x["total"]))
+        log["candidates"] = len(cands)
         good = []
         for c in cands[:MAX_DOC_QUERIES]:
             m = monthly_docs(c["keyword"])
-            if not m or m >= 3000:
+            if not m:
+                log["doc_fail"] += 1
+                continue
+            if m >= MAX_DOCS:
+                log["too_many_docs"] += 1
                 continue
             ratio = m / c["total"] if c["total"] else 999
             if ratio <= RATIO_A:
                 good.append((ratio, c["keyword"]))
+            else:
+                log["ratio_fail"] += 1
             time.sleep(0.12)
         good.sort()
         result = [k for _, k in good[:30]]
-        if result:
-            save_pool(result)
+        log["passed"] = len(result)
+        if len(result) >= MIN_SAVE:
+            merged = result + [k for k in DEFAULT_POOL if k not in result]
+            save_pool(merged[:45])
             _used.clear()
+            log["saved"] = True
     finally:
+        _last_log = log
         _refreshing = False
 
 
@@ -179,7 +196,7 @@ def refresh():
     if _refreshing:
         return {"status": "이미 갱신 중입니다"}
     threading.Thread(target=rebuild, daemon=True).start()
-    return {"status": "갱신 시작. 2분 뒤 /status 확인"}
+    return {"status": "갱신 시작. 3분 뒤 /status 확인"}
 
 
 @app.get("/status")
@@ -187,7 +204,8 @@ def status():
     d = load_pool()
     return {"refreshing": _refreshing, "updated": d["updated"],
             "days_old": days_old(d["updated"]),
-            "count": len(d["keywords"]), "keywords": d["keywords"]}
+            "count": len(d["keywords"]), "last_run": _last_log,
+            "keywords": d["keywords"]}
 
 
 @app.get("/")
